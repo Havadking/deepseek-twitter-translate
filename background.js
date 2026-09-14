@@ -19,6 +19,13 @@ const TEMPERATURES = { translate: 1.3, explain: 1.0 };
 
 const REQUEST_TIMEOUT_MS = 170000;
 
+// DeepSeek answers 503 "Service is too busy" under load; a couple of spaced
+// retries usually get through without bothering the user.
+const RETRY_STATUSES = new Set([429, 503]);
+const RETRY_DELAYS_MS = [1500, 3500];
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 async function getSettings() {
   const stored = await chrome.storage.local.get(Object.keys(DEFAULTS));
   const s = { ...DEFAULTS, ...stored };
@@ -71,35 +78,46 @@ async function callDeepSeek(mode, text, quotedText, targetLang) {
     messages: buildMessages(mode, text, quotedText, targetLang || settings.targetLang),
   };
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
   let resp;
-  try {
-    resp = await fetch("https://api.deepseek.com/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${settings.apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-  } catch (e) {
-    clearTimeout(timer);
-    if (e?.name === "AbortError") {
-      return { ok: false, error: `请求超时（模型 ${model} 没有在限定时间内返回）。` };
+  for (let attempt = 0; ; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      resp = await fetch("https://api.deepseek.com/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${settings.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } catch (e) {
+      clearTimeout(timer);
+      if (e?.name === "AbortError") {
+        return { ok: false, error: `请求超时（模型 ${model} 没有在限定时间内返回）。` };
+      }
+      return { ok: false, error: `网络请求失败：${String(e)}` };
     }
-    return { ok: false, error: `网络请求失败：${String(e)}` };
-  }
-  clearTimeout(timer);
+    clearTimeout(timer);
 
-  if (!resp.ok) {
+    if (resp.ok) break;
+
     let detail = "";
     try {
       detail = (await resp.text()).slice(0, 300);
     } catch (_) {}
-    return { ok: false, error: `DeepSeek API 返回错误 (${resp.status}，模型 ${model})：${detail}` };
+
+    if (RETRY_STATUSES.has(resp.status) && attempt < RETRY_DELAYS_MS.length) {
+      await sleep(RETRY_DELAYS_MS[attempt]);
+      continue;
+    }
+    const busyHint =
+      resp.status === 503
+        ? `DeepSeek 服务当前过载，已自动重试 ${RETRY_DELAYS_MS.length} 次仍失败，请稍后再试或换一个模型。
+`
+        : "";
+    return { ok: false, error: `${busyHint}DeepSeek API 返回错误 (${resp.status}，模型 ${model})：${detail}` };
   }
 
   let data;
