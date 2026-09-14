@@ -14,6 +14,14 @@ const els = {
   status: document.getElementById("status"),
 };
 
+// Model ids this extension shipped with before DeepSeek retired them.
+const RETIRED_MODELS = new Set(["deepseek-chat", "deepseek-reasoner"]);
+
+function normalizeModel(value, fallback) {
+  const v = (value || "").trim();
+  return !v || RETIRED_MODELS.has(v) ? fallback : v;
+}
+
 function setStatus(text, kind) {
   els.status.textContent = text;
   els.status.className = kind || "";
@@ -44,9 +52,9 @@ function collect() {
     apiKey: els.apiKey.value.trim(),
     targetLang: currentTargetLang(),
     showTranslate: els.showTranslate.checked,
-    translateModel: els.translateModel.value,
+    translateModel: els.translateModel.value.trim() || "deepseek-flash",
     showExplain: els.showExplain.checked,
-    explainModel: els.explainModel.value,
+    explainModel: els.explainModel.value.trim() || "deepseek-v4-pro",
   };
 }
 
@@ -64,8 +72,8 @@ async function load() {
   els.apiKey.value = s.apiKey || "";
   els.showTranslate.checked = s.showTranslate !== false;
   els.showExplain.checked = s.showExplain !== false;
-  els.translateModel.value = s.translateModel || "deepseek-chat";
-  els.explainModel.value = s.explainModel || "deepseek-reasoner";
+  els.translateModel.value = normalizeModel(s.translateModel, "deepseek-flash");
+  els.explainModel.value = normalizeModel(s.explainModel, "deepseek-v4-pro");
   applyTargetLangToUI(s.targetLang || "简体中文");
 }
 
@@ -89,7 +97,7 @@ els.test.addEventListener("click", async () => {
   setStatus("正在测试…", "");
   const resp = await chrome.runtime.sendMessage({ type: "DEEPSEEK_TEST_KEY" });
   if (resp?.ok) {
-    setStatus(`连接成功，示例翻译结果：${resp.content}`, "ok");
+    setStatus(`连接成功（模型 ${resp.model}），示例翻译结果：${resp.content}`, "ok");
   } else {
     setStatus(resp?.error || "测试失败。", "err");
   }

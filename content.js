@@ -395,6 +395,28 @@
     return article?.querySelector(`.ds-btn[data-deepseek-btn="${mode}"]`) || null;
   }
 
+  // Never leaves the spinner running: a reloaded extension (context
+  // invalidated) or a hung request both come back as an error object.
+  const REQUEST_TIMEOUT_MS = 180000;
+  async function requestDeepSeek(payload) {
+    const timeout = new Promise((resolve) =>
+      setTimeout(() => resolve({ ok: false, error: "请求超时，DeepSeek 没有在 3 分钟内返回结果。" }), REQUEST_TIMEOUT_MS)
+    );
+    try {
+      const resp = await Promise.race([chrome.runtime.sendMessage(payload), timeout]);
+      if (!resp) {
+        return { ok: false, error: "后台没有响应，请在 chrome://extensions 里重新加载插件后刷新页面。" };
+      }
+      return resp;
+    } catch (e) {
+      const msg = String(e?.message || e);
+      if (/context invalidated/i.test(msg)) {
+        return { ok: false, error: "插件刚刚更新过，请刷新这个页面后再试。" };
+      }
+      return { ok: false, error: msg };
+    }
+  }
+
   async function runAction(mode, article, btn) {
     let st = getState(article);
 
@@ -465,7 +487,7 @@
       return;
     }
 
-    const resp = await chrome.runtime.sendMessage({
+    const resp = await requestDeepSeek({
       type: "DEEPSEEK_RUN",
       mode,
       text,

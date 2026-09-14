@@ -4,19 +4,29 @@
 
 const DEFAULTS = {
   apiKey: "",
-  translateModel: "deepseek-chat",
-  explainModel: "deepseek-reasoner",
+  translateModel: "deepseek-flash",
+  explainModel: "deepseek-v4-pro",
   targetLang: "简体中文",
   enabled: true,
 };
 
-// deepseek-reasoner ignores sampling params, so temperature is only sent for
-// the chat models. 1.3 is DeepSeek's documented pick for translation.
+// Model ids this extension shipped with before DeepSeek retired them; a
+// stored value equal to one of these is treated as "use the default".
+const RETIRED_MODELS = new Set(["deepseek-chat", "deepseek-reasoner"]);
+
+// 1.3 is DeepSeek's documented pick for translation.
 const TEMPERATURES = { translate: 1.3, explain: 1.0 };
+
+const REQUEST_TIMEOUT_MS = 170000;
 
 async function getSettings() {
   const stored = await chrome.storage.local.get(Object.keys(DEFAULTS));
-  return { ...DEFAULTS, ...stored };
+  const s = { ...DEFAULTS, ...stored };
+  for (const key of ["translateModel", "explainModel"]) {
+    const v = (s[key] || "").trim();
+    s[key] = !v || RETIRED_MODELS.has(v) ? DEFAULTS[key] : v;
+  }
+  return s;
 }
 
 function buildMessages(mode, text, quotedText, targetLang) {
@@ -57,11 +67,12 @@ async function callDeepSeek(mode, text, quotedText, targetLang) {
   const body = {
     model,
     stream: false,
+    temperature: TEMPERATURES[mode] ?? 1.0,
     messages: buildMessages(mode, text, quotedText, targetLang || settings.targetLang),
   };
-  if (model !== "deepseek-reasoner") {
-    body.temperature = TEMPERATURES[mode] ?? 1.0;
-  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   let resp;
   try {
@@ -72,17 +83,23 @@ async function callDeepSeek(mode, text, quotedText, targetLang) {
         Authorization: `Bearer ${settings.apiKey}`,
       },
       body: JSON.stringify(body),
+      signal: controller.signal,
     });
   } catch (e) {
+    clearTimeout(timer);
+    if (e?.name === "AbortError") {
+      return { ok: false, error: `请求超时（模型 ${model} 没有在限定时间内返回）。` };
+    }
     return { ok: false, error: `网络请求失败：${String(e)}` };
   }
+  clearTimeout(timer);
 
   if (!resp.ok) {
     let detail = "";
     try {
-      detail = (await resp.text()).slice(0, 200);
+      detail = (await resp.text()).slice(0, 300);
     } catch (_) {}
-    return { ok: false, error: `DeepSeek API 返回错误 (${resp.status})：${detail}` };
+    return { ok: false, error: `DeepSeek API 返回错误 (${resp.status}，模型 ${model})：${detail}` };
   }
 
   let data;
@@ -94,7 +111,7 @@ async function callDeepSeek(mode, text, quotedText, targetLang) {
 
   const content = data?.choices?.[0]?.message?.content?.trim();
   if (!content) return { ok: false, error: "DeepSeek 返回了空结果。" };
-  return { ok: true, content };
+  return { ok: true, content, model };
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
